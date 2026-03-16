@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Game Tembak</title>
+<style>
+  body { margin:0; background:#0b1220; color:#fff; font-family:Arial, sans-serif; overflow:hidden; }
+  #gameCanvas { display:block; background: linear-gradient(#071026,#0b1220); margin:0 auto; }
+  #overlay {
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,0,0,0.6); z-index:50; flex-direction:column; gap:12px;
+  }
+  #overlay button { padding:12px 18px; font-size:16px; border-radius:8px; border:0; cursor:pointer; background:#ff6b00; color:#fff; }
+  #message { max-width:90%; text-align:center; font-size:18px; }
+  #errBox { position:fixed; left:12px; bottom:12px; background:rgba(255,0,0,0.12); color:#fff; padding:8px 12px; border-radius:6px; display:none; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<div id="overlay">
+  <div id="message">
+    <div style="font-size:28px; font-weight:700; margin-bottom:6px;">Click to Start</div>
+    <div style="font-size:14px; opacity:0.9;">Game Ini Di Buat Oleh Yoshi Xcode</div>
+  </div>
+  <button id="startBtn">Start Game</button>
+  <div style="font-size:12px; opacity:0.8; margin-top:8px;">/Suyoshi Xcode/</div>
+</div>
+
+<div id="errBox"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------------------
+  // Assets (gambar + audio fallback list)
+  // Suyoshi Xcode 
+  // ---------------------
+  const asset = {
+    shooterImgSrc: 'foto1',
+    fruitSrcs: [
+      'foto1.jpg',
+      'foto2.jpg',
+      'foto3.jpg'
+    ],
+    // beberapa fallback langsung mp3 dari pixabay (direct download links)
+    audioCandidates: [
+      'pistol.mp3',
+      'pistol.mp3',
+      'pistol.mp3'
+    ]
+  };
+
+  // ---------------------
+  // UI Elements
+ // Suyoshi Xcode
+  // ---------------------
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const errBox = document.getElementById('errBox');
+
+  function showErr(text) {
+    console.error(text);
+    errBox.style.display = 'block';
+    errBox.innerText = text;
+    setTimeout(()=>{ errBox.style.display='none'; }, 6000);
+  }
+
+  // ---------------------
+  // Preload images with fallback
+  // Suyoshi Xcode
+  // ---------------------
+  function loadImage(src) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve({ok:true, img});
+      img.onerror = () => resolve({ok:false, src});
+      img.src = src;
+    });
+  }
+
+  // We'll attempt to load shooter + 3 buah
+  let shooterImg = null;
+  const fruitImgs = [];
+
+  async function preloadImages() {
+    const s = await loadImage(asset.shooterImgSrc);
+    if(s.ok) shooterImg = s.img;
+    else {
+      shooterImg = null;
+      console.warn('Shooter image gagal dimuat, akan memakai gambar canvas sederhana.');
+    }
+
+    for(const src of asset.fruitSrcs) {
+      const r = await loadImage(src);
+      if(r.ok) fruitImgs.push(r.img);
+      else console.warn('Fruit image gagal: ' + src);
+    }
+    if(fruitImgs.length === 0) {
+      console.warn('Tidak ada gambar buah berhasil dimuat — buah akan digambar manual.');
+    }
+  }
+
+  // ---------------------
+  // Audio loader with fallback attempts
+  // Yoshi Xcode
+  // ---------------------
+  let fireSound = null;
+  let audioIndex = 0;
+  function tryCreateAudio(url) {
+    try {
+      const a = new Audio();
+      a.src = url;
+      a.preload = 'auto';
+      a.crossOrigin = 'anonymous';
+      a.volume = 1.0;
+      return a;
+    } catch (e) {
+      console.warn('create Audio failed for', url, e);
+      return null;
+    }
+  }
+
+  function attemptAudioPlay(audioObj) {
+    // attempt to load & play once user gesture allowed it — returns promise
+    return new Promise((resolve) => {
+      let resolved = false;
+      function success() {
+        if(resolved) return;
+        resolved = true;
+        resolve({ok:true, audio: audioObj});
+      }
+      function fail(err) {
+        if(resolved) return;
+        resolved = true;
+        resolve({ok:false, err});
+      }
+      audioObj.onerror = () => fail(new Error('audio.onerror'));
+      // some browsers reject play if not allowed - must call after gesture
+      audioObj.play().then(success).catch(fail);
+      // also set a timeout fallback
+      setTimeout(()=>{ if(!resolved) fail(new Error('audio play timeout')); }, 2500);
+    });
+  }
+
+  async function prepareAudioWithFallback() {
+    for(let i=0;i<asset.audioCandidates.length;i++){
+      const url = asset.audioCandidates[i];
+      const a = tryCreateAudio(url);
+      if(!a) continue;
+      // small silent play test after gesture will be done in startGame (we return audio obj)
+      // Add error handler to try next if load fails later
+      fireSound = a;
+      audioIndex = i;
+      console.log('Menggunakan audio candidate:', url);
+      return true;
+    }
+    console.warn('Semua candidate audio gagal dibuat');
+    return false;
+  }
+
+  // ---------------------
+  // Game variables
+  // ---------------------
+  let shooter = { x: 0, y: 0, width: 100, height: 100 };
+  let bullets = [];
+  let targets = [];
+  let score = 0;
+  let running = false;
+
+  function spawnTarget() {
+    const w = 60, h = 60;
+    const x = Math.random() * (canvas.width - w);
+    const y = 60 + Math.random() * 220;
+    const speed = (Math.random() < 0.5 ? 1 : -1) * (2 + Math.random()*2.5);
+    const img = fruitImgs.length ? fruitImgs[Math.floor(Math.random()*fruitImgs.length)] : null;
+    targets.push({ x, y, w, h, speed, img, hp:1 });
+  }
+
+  // ---------------------
+  // Drawing helpers
+  // ---------------------
+  function drawShooter() {
+    if(shooterImg) {
+      ctx.drawImage(shooterImg, shooter.x, shooter.y, shooter.width, shooter.height);
+    } else {
+      // simple gun shape
+      ctx.fillStyle = '#7a5c3b';
+      ctx.fillRect(shooter.x, shooter.y + shooter.height*0.6, shooter.width, shooter.height*0.4);
+      ctx.fillStyle = '#444';
+      ctx.fillRect(shooter.x + shooter.width*0.35, shooter.y, shooter.width*0.3, shooter.height*0.6);
+    }
+  }
+
+  function drawTargets() {
+    targets.forEach(t => {
+      if(t.img) ctx.drawImage(t.img, t.x, t.y, t.w, t.h);
+      else {
+        // fallback drawing: circle fruit
+        ctx.beginPath();
+        ctx.fillStyle = '#ff6b6b';
+        ctx.ellipse(t.x + t.w/2, t.y + t.h/2, t.w/2, t.h/2, 0, 0, Math.PI*2);
+        ctx.fill();
+      }
+    });
+  }
+
+  function drawBullets() {
+    bullets.forEach(b => {
+      // bullet body
+      ctx.fillStyle = '#ffd666';
+      ctx.fillRect(b.x, b.y, 6, 18);
+
+      // little flame effect
+      ctx.fillStyle = 'rgba(255,120,0,0.9)';
+      ctx.fillRect(b.x - 4, b.y + 16, 14, 8);
+    });
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px Arial';
+    ctx.fillText('Score: ' + score, 16, 34);
+  }
+
+  // ---------------------
+  // Update
+  // ---------------------
+  function updateGame() {
+    // bullets move up
+    for(let i=bullets.length-1;i>=0;i--){
+      bullets[i].y -= bullets[i].speed;
+      if(bullets[i].y < -40) bullets.splice(i,1);
+    }
+
+    // targets move sideways
+    targets.forEach(t=>{
+      t.x += t.speed;
+      if(t.x <= 0) { t.x = 0; t.speed *= -1; }
+      if(t.x + t.w >= canvas.width) { t.x = canvas.width - t.w; t.speed *= -1; }
+    });
+
+    // collisions
+    for(let bi = bullets.length-1; bi >= 0; bi--){
+      const b = bullets[bi];
+      for(let ti = targets.length-1; ti >= 0; ti--){
+        const t = targets[ti];
+        if(b.x < t.x + t.w && b.x + 6 > t.x && b.y < t.y + t.h && b.y + 18 > t.y){
+          // hit
+          bullets.splice(bi,1);
+          targets.splice(ti,1);
+          score += 1;
+          // small hit sound optional (we could play another audio)
+          break;
+        }
+      }
+    }
+  }
+
+  // ---------------------
+  // Main loop
+  // ---------------------
+  function loop() {
+    if(!running) return;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawShooter();
+    drawTargets();
+    drawBullets();
+    drawHUD();
+    updateGame();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------------------
+  // Input
+  // By Yoshi Xcode
+  // ---------------------
+  window.addEventListener('mousemove', (e)=>{
+    shooter.x = e.clientX - shooter.width/2;
+    if(shooter.x < 0) shooter.x = 0;
+    if(shooter.x + shooter.width > canvas.width) shooter.x = canvas.width - shooter.width;
+  });
+
+  window.addEventListener('click', async (e)=>{
+    if(!running) return;
+    spawnBulletAt(shooter.x + shooter.width/2 - 3, shooter.y);
+    await playFire(); // attempt to play (may fail if audio not allowed)
+  });
+
+  // touch drag shooter
+  let touchStartX = null;
+  canvas.addEventListener('touchstart', (ev) => {
+    if(ev.touches && ev.touches[0]) touchStartX = ev.touches[0].clientX;
+  }, {passive:true});
+  canvas.addEventListener('touchmove', (ev) => {
+    if(ev.touches && ev.touches[0] && touchStartX !== null) {
+      const cur = ev.touches[0].clientX;
+      shooter.x += (cur - touchStartX);
+      touchStartX = cur;
+      if(shooter.x < 0) shooter.x = 0;
+      if(shooter.x + shooter.width > canvas.width) shooter.x = canvas.width - shooter.width;
+    }
+  }, {passive:true});
+  canvas.addEventListener('touchend', ()=> touchStartX = null);
+
+  function spawnBulletAt(x,y){
+    bullets.push({ x, y, speed: 12 });
+  }
+
+  // ---------------------
+  // Audio play with fallback logic
+  // ---------------------
+  async function playFire() {
+    if(!fireSound) return;
+    // if sound currently has not loaded or errored, try to play and fallback if needed
+    try {
+      fireSound.currentTime = 0;
+      const p = fireSound.play();
+      if(p && typeof p.then === 'function') {
+        await p;
+      }
+    } catch (err) {
+      // play failed, try next candidate
+      console.warn('Audio play failed for candidate', audioIndex, err);
+      // try fallback candidates if any
+      for(let i = 0; i < asset.audioCandidates.length; i++) {
+        if(i === audioIndex) continue;
+        const url = asset.audioCandidates[i];
+        const a = tryCreateAudio(url);
+        if(!a) continue;
+        try {
+          a.currentTime = 0;
+          await a.play();
+          // swap to working audio
+          fireSound = a;
+          audioIndex = i;
+          console.log('Switched to fallback audio index', i, url);
+          return;
+        } catch(e) {
+          console.warn('Fallback audio failed for', url, e);
+        }
+      }
+      showErr('Audio gagal diputar. Cek izin autoplay atau coba browser lain.');
+    }
+  }
+
+  // ---------------------
+  // Start game (after user gesture)
+  // ---------------------
+  async function startGame() {
+    overlay.style.display = 'none';
+    // small vibration of readiness
+    try { navigator.vibrate && navigator.vibrate(100); } catch(e){}
+
+    // Try to ensure audio can be used: attempt small silent play to unlock
+    if(!fireSound) {
+      const ok = await prepareAudioWithFallback();
+      if(!ok) {
+        showErr('Tidak ada audio kandidat sesuai. Game tetap jalan tanpa suara.');
+      }
+    }
+
+    // attempt to "unlock" audio by playing and pausing immediately
+    if(fireSound) {
+      try {
+        fireSound.volume = 1.0;
+        fireSound.muted = false;
+        await fireSound.play();
+        fireSound.pause();
+        fireSound.currentTime = 0;
+        console.log('Audio unlocked (gesture).');
+      } catch(e) {
+        console.warn('Gagal unlock audio saat start:', e);
+      }
+    }
+
+    // Start spawning / loop
+    running = true;
+    shooter.x = canvas.width/2 - shooter.width/2;
+    shooter.y = canvas.height - shooter.height - 20;
+
+    // spawn some initial targets
+    for(let i=0;i<6;i++) spawnTarget();
+    // periodic spawn
+    window._spawnInterval = setInterval(()=>{
+      if(running) spawnTarget();
+    }, 1100);
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---------------------
+  // Initialize preload then wait for gesture
+  // ---------------------
+  (async () => {
+    await preloadImages();
+    await prepareAudioWithFallback();
+    // show overlay and wait for user to press Start
+  })();
+
+  startBtn.addEventListener('click', async (ev) => {
+    try {
+      // Try to play the current audio once to unlock; if fails we'll fallback inside playFire later
+      if(fireSound) {
+        try { await fireSound.play(); fireSound.pause(); fireSound.currentTime = 0; } catch(e){ console.warn('initial audio play failed', e); }
+      }
+    } catch(e){ console.warn('start audio attempt failed', e); }
+    startGame();
+  });
+
+  // Keyboard (space to shoot)
+  window.addEventListener('keydown', async (e) => {
+    if(e.code === 'Space') {
+      if(!running) { startGame(); return; }
+      spawnBulletAt(shooter.x + shooter.width/2 - 3, shooter.y);
+      await playFire();
+    }
+  });
+
+  // Debug helper: expose to console
+  window.__GAME = {
+    assets: asset,
+    reloadAudio: prepareAudioWithFallback,
+    showErr
+  };
+
+})();
+</script>
+</body>
+      </html>
